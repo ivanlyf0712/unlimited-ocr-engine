@@ -1,0 +1,19 @@
+# Python virtual environment
+venv/
+
+# Generated / large data files
+data/
+
+# Temporary files
+/tmp/
+*.pyc
+__pycache__/
+
+# Streamlit secrets (if any)
+.streamlit/
+
+# Model files (downloaded GGUF)
+*.gguf
+
+# Docker volumes
+ollama_data/
