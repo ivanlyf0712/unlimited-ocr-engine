@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Create the invoices table with pgvector support.
-Use this for fresh installations. For migrating an existing database, use migrate_db.py.
+Drop and recreate the invoices table with the corrected schema (VECTOR(1024)).
+WARNING: This DELETES all existing invoice data. Run setup_db.py afterward.
 """
 import psycopg2
 
@@ -17,9 +17,12 @@ cur = conn.cursor()
 cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
 cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
 
-# Create the table (mxbai-embed-large outputs 1024-dim vectors)
+# Drop existing table (if any)
+cur.execute("DROP TABLE IF EXISTS invoices CASCADE;")
+
+# Create table with correct vector dimension
 cur.execute("""
-    CREATE TABLE IF NOT EXISTS invoices (
+    CREATE TABLE invoices (
         id SERIAL PRIMARY KEY,
         invoice_number VARCHAR(100),
         date VARCHAR(50),
@@ -33,21 +36,21 @@ cur.execute("""
     );
 """)
 
-# Create HNSW index for fast approximate nearest-neighbor search.
-# HNSW offers better recall/speed trade-off than IVFFlat for most workloads.
+# HNSW index for fast ANN search
 cur.execute("""
-    CREATE INDEX IF NOT EXISTS invoices_embedding_hnsw_idx
+    CREATE INDEX invoices_embedding_hnsw_idx
     ON invoices USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 200);
 """)
 
-# Index for vendor_filter queries (ILIKE benefits from trigram index)
+# Trigram index for vendor ILIKE filters
 cur.execute("""
-    CREATE INDEX IF NOT EXISTS invoices_vendor_name_trgm_idx
+    CREATE INDEX invoices_vendor_name_trgm_idx
     ON invoices USING gin (vendor_name gin_trgm_ops);
 """)
 
 conn.commit()
 cur.close()
 conn.close()
-print("Database table ready (VECTOR(1024), HNSW index, trigram index).")
+print("Migration complete. Table recreated with VECTOR(1024), HNSW index, trigram index.")
+print("Now re-upload your invoices via the Streamlit UI — embeddings will be generated from raw_text.")

@@ -81,25 +81,42 @@ def extract_json(image_path: str):
         return None, elapsed, content
 
 # --------------------------- DATABASE INSERT ---------------------------
+def get_embedding(text: str):
+    """Generate embedding via Ollama mxbai-embed-large (1024-dim)."""
+    resp = requests.post(
+        "http://127.0.0.1:11434/api/embed",
+        json={"model": "mxbai-embed-large", "input": text[:4096]}
+    )
+    resp.raise_for_status()
+    return resp.json()["embeddings"][0]
+
+
 def insert_into_db(fields: dict, raw_text: str, source_file: str = ""):
-    """Insert one invoice record. Skips embedding (NULL)."""
+    """Insert one invoice record and generate embedding from raw_text."""
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     try:
         cur.execute("""
             INSERT INTO invoices (invoice_number, date, vendor_name,
-                                  total_amount, currency, raw_text)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                                  total_amount, currency, raw_text, source_file)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
         """, (
             fields.get("invoice_number", ""),
             fields.get("date", ""),
             fields.get("vendor_name", ""),
             fields.get("total_amount", ""),
             fields.get("currency", ""),
-            raw_text
+            raw_text,
+            source_file
         ))
+        new_id = cur.fetchone()[0]
+        # Generate embedding from raw_text (not structured fields)
+        if raw_text and raw_text.strip():
+            vec = get_embedding(raw_text.strip())
+            cur.execute("UPDATE invoices SET embedding = %s WHERE id = %s", (vec, new_id))
         conn.commit()
-        print(f"  ✅ Inserted: {source_file}")
+        print(f"  ✅ Inserted: {source_file} (id={new_id}, embedding generated)")
     except Exception as e:
         conn.rollback()
         print(f"  ❌ DB insert error for {source_file}: {e}")

@@ -10,7 +10,7 @@ Stricter one‑time clean‑up:
 import json, re, psycopg2, requests
 
 OLLAMA_EMBED = "http://127.0.0.1:11434/api/embed"
-EMBED_MODEL = "nomic-embed-text"
+EMBED_MODEL = "mxbai-embed-large"
 
 DB_CONFIG = {
     "host": "localhost", "port": 5432,
@@ -104,14 +104,15 @@ def main():
         cur.execute("UPDATE invoices SET source_file = %s WHERE id = %s", (placeholder, row_id))
         print(f"  id={row_id}: source_file='{placeholder}'")
 
-    # 3. Regenerate missing embeddings
+    # 3. Regenerate missing embeddings (from raw_text, truncated to 4096 chars)
     print("\nRegenerating missing embeddings ...")
     cur.execute("SELECT id, raw_text FROM invoices WHERE embedding IS NULL")
     for row_id, raw_text in cur.fetchall():
-        if raw_text:
-            vec = get_embedding(raw_text)
+        if raw_text and raw_text.strip():
+            text_to_embed = raw_text.strip()[:4096]
+            vec = get_embedding(text_to_embed)
             cur.execute("UPDATE invoices SET embedding = %s WHERE id = %s", (vec, row_id))
-            print(f"  id={row_id}: embedding generated")
+            print(f"  id={row_id}: embedding generated ({len(text_to_embed)} chars)")
 
     conn.commit()
     cur.close()

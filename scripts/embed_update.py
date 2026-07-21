@@ -1,37 +1,25 @@
 #!/usr/bin/env python3
-"""Generate embeddings using mxbai-embed-large from structured fields only."""
+"""Generate embeddings using mxbai-embed-large from raw_text."""
 
-import requests
 import psycopg2
 
-OLLAMA_EMBED = "http://127.0.0.1:11434/api/embed"
-EMBED_MODEL = "mxbai-embed-large"
+from core.config import DB_CONFIG
+from core.embedding import get_embedding
 
-DB_CONFIG = {
-    "host": "localhost", "port": 5432,
-    "user": "ocr", "password": "***REMOVED***", "dbname": "invoices"
-}
-
-def get_embedding(text: str) -> list[float]:
-    resp = requests.post(OLLAMA_EMBED, json={"model": EMBED_MODEL, "input": text})
-    resp.raise_for_status()
-    return resp.json()["embeddings"][0]
 
 def main():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
     # Find rows where embedding is NULL
-    cur.execute("SELECT id, invoice_number, date, vendor_name, total_amount, currency FROM invoices WHERE embedding IS NULL")
+    cur.execute("SELECT id, raw_text FROM invoices WHERE embedding IS NULL")
     rows = cur.fetchall()
 
-    for row_id, inv_num, date, vendor, amount, currency in rows:
-        # Build a clean string from the five fields
-        parts = [str(p) for p in [inv_num, date, vendor, amount, currency] if p]
-        if not parts:
+    for row_id, raw_text in rows:
+        if not raw_text or not raw_text.strip():
             continue
-        text_to_embed = " ".join(parts)
-        print(f"Embedding row {row_id}: {text_to_embed}")
+        text_to_embed = raw_text.strip()[:4096]  # truncate to embedding model context
+        print(f"Embedding row {row_id} ({len(text_to_embed)} chars)...")
         vec = get_embedding(text_to_embed)
         cur.execute("UPDATE invoices SET embedding = %s WHERE id = %s", (vec, row_id))
 

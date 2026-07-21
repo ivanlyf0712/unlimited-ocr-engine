@@ -54,7 +54,7 @@ process_path() {
 
 embed_all() {
     echo "🧠 Generating embeddings for all unembedded rows..."
-    python3 embed_update.py
+    python3 scripts/embed_update.py
     echo "✅ Embeddings generated."
 }
 

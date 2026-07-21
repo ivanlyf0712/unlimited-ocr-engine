@@ -4,20 +4,17 @@ Batch‑update embeddings for all invoices (fast version).
 Processes up to 100 texts per Ollama call.
 """
 
-import requests, psycopg2, time
+import psycopg2, time
+import requests
 
-OLLAMA_EMBED = "http://127.0.0.1:11434/api/embed"
+from core.config import DB_CONFIG, OLLAMA_URL
+
 MODEL = "mxbai-embed-large"          # or "nomic-embed-text" for even faster
 BATCH_SIZE = 100
 
-DB_CONFIG = {
-    "host": "localhost", "port": 5432,
-    "user": "ocr", "password": "***REMOVED***", "dbname": "invoices"
-}
-
 def get_embeddings(texts):
     """Return a list of vectors for the given texts."""
-    resp = requests.post(OLLAMA_EMBED, json={
+    resp = requests.post(f"{OLLAMA_URL}/api/embed", json={
         "model": MODEL,
         "input": texts
     })
@@ -28,9 +25,9 @@ def main():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
-    # Select rows that need embedding – using structured fields as before
+    # Select rows that need embedding – embed raw_text (the OCR output), not structured fields
     cur.execute("""
-        SELECT id, invoice_number, date, vendor_name, total_amount, currency
+        SELECT id, raw_text
         FROM invoices
         WHERE embedding IS NULL
     """)
@@ -38,12 +35,12 @@ def main():
     total = len(rows)
     print(f"Found {total} rows to embed.")
 
-    # Build the text for each row (same field concatenation as before)
+    # Build the text for each row: use raw_text, truncated to 4096 chars
     row_texts = []
     for row in rows:
-        parts = [str(p) for p in row[1:6] if p]   # inv_num, date, vendor, amount, currency
-        text = " ".join(parts) if parts else ""
-        row_texts.append((row[0], text))   # keep id
+        raw = (row[1] or "").strip()
+        text = raw[:4096] if raw else ""
+        row_texts.append((row[0], text))
 
     # Process in batches
     for i in range(0, total, BATCH_SIZE):
