@@ -2,7 +2,9 @@
 import subprocess
 import re
 
-from core.config import LLAMA_CLI, UOCR_MODEL, UOCR_MMPROJ
+from PIL import Image
+
+from core.config import LLAMA_CLI, UOCR_MODEL, UOCR_MMPROJ, MAX_LONG_EDGE, JPEG_QUALITY
 
 
 def clean_grounding_tags(text: str) -> str:
@@ -17,10 +19,23 @@ def clean_grounding_tags(text: str) -> str:
     return cleaned.strip()
 
 
+def preprocess_image(image_path: str) -> str:
+    """Resize and compress an image for faster OCR. Returns path to temp file."""
+    img = Image.open(image_path).convert("RGB")
+    w, h = img.size
+    if max(w, h) > MAX_LONG_EDGE:
+        ratio = MAX_LONG_EDGE / max(w, h)
+        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+    tmp = "/tmp/ocr_fast.jpg"
+    img.save(tmp, "JPEG", quality=JPEG_QUALITY)
+    return tmp
+
+
 def run_ocr(image_path: str) -> str:
-    """Run Unlimited-OCR on the given image path and return cleaned text."""
+    """Preprocess image, then run Unlimited-OCR and return cleaned text."""
+    processed_path = preprocess_image(image_path)
     cmd = [LLAMA_CLI, "-m", UOCR_MODEL, "--mmproj", UOCR_MMPROJ,
-           "--image", image_path, "-p", "Free OCR.",
+           "--image", processed_path, "-p", "Free OCR.",
            "--chat-template", "deepseek-ocr",
            "--temp", "0", "-c", "2048", "-ngl", "0",
            "--threads", "4", "-n", "384"]
