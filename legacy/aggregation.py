@@ -1,39 +1,27 @@
-#!/usr/bin/env python3
+# ──────────────────── Aggregation Engine ────────────────────
 """
-Aggregation Engine — converts natural language questions into SQL queries,
-runs them against PostgreSQL, and returns LLM-rephrased answers.
+Converts natural-language questions into SQL queries, runs them against
+PostgreSQL, and returns LLM-rephrased answers.
 
 Import into app.py for the hybrid query router.
-
-Usage from app.py:
-    from agg_engine import is_aggregation_query, handle_aggregation
-
-    if is_aggregation_query(query):
-        answer = handle_aggregation(query, vendor_filter, date_from, date_to)
-    else:
-        # fall through to existing vector search + RAG pipeline
 """
 import re
 import textwrap
 import calendar
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Tuple, List
 
 import requests
 import psycopg2
 
-# ── Config ──
-OLLAMA_URL = "http://127.0.0.1:11434"
-RAG_MODEL = "qwen2.5:1.5b"
+from core.config import OLLAMA_URL, DB_CONFIG
 
-DB_CONFIG = {
-    "host": "localhost", "port": 5432,
-    "user": "ocr", "password": "***REMOVED***", "dbname": "invoices"
-}
+RAG_MODEL = "qwen2.5:1.5b"
 
 # ────────────────────────────────────────────────
 # 1. INTENT CLASSIFIER
 # ────────────────────────────────────────────────
+
 AGGREGATION_KEYWORDS = [
     r"\btotal\b", r"\bsum\b", r"\baverage\b", r"\bavg\b",
     r"\bhighest\b", r"\blowest\b", r"\bmaximum\b", r"\bminimum\b",
@@ -41,6 +29,9 @@ AGGREGATION_KEYWORDS = [
     r"\bgroup by\b", r"\bper\b", r"\beach\b",
     r"\bsummarize\b", r"\bsummary\b", r"\bbreakdown\b",
     r"\blargest\b", r"\bsmallest\b", r"\btop\b",
+    r"\bbiggest\b", r"\bshow me\b", r"\blist\b", r"\bdisplay\b",
+    r"\bfind\b", r"\bshow\b",
+    # Chinese
     r"总金额", r"平均", r"最高", r"最低", r"最多", r"最少",
     r"汇总", r"统计", r"数量", r"多少", r"有几个", r"排名",
 ]
@@ -50,12 +41,19 @@ AGG_CONTEXT = re.compile(
     re.IGNORECASE
 )
 
+_SEMANTIC_CONTEXT = re.compile(
+    r"\b(about|related to|regarding|like|similar to|containing|description|details)\b",
+    re.IGNORECASE
+)
+
 AGG_PATTERN = re.compile("|".join(AGGREGATION_KEYWORDS), re.IGNORECASE)
 
 
 def is_aggregation_query(query: str) -> bool:
-    """Return True if the query likely needs SQL aggregation instead of vector search."""
+    """Regex‑based aggregation intent detection."""
     if not AGG_PATTERN.search(query):
+        return False
+    if _SEMANTIC_CONTEXT.search(query):
         return False
     return bool(AGG_CONTEXT.search(query))
 
@@ -63,6 +61,7 @@ def is_aggregation_query(query: str) -> bool:
 # ────────────────────────────────────────────────
 # 2. EXTRACTORS
 # ────────────────────────────────────────────────
+
 _vendor_cache: Optional[List[str]] = None
 
 
@@ -104,13 +103,32 @@ def extract_vendor_from_query(query: str) -> Optional[str]:
 
 def extract_date_range_from_query(query: str) -> Tuple[Optional[str], Optional[str]]:
     q = query.lower()
+
     m = re.search(r'between\s+(\d{4}-\d{2}-\d{2})\s+and\s+(\d{4}-\d{2}-\d{2})', q)
     if m:
         return m.group(1), m.group(2)
+
+    # "last month" (relative)
+    if "last month" in q:
+        today = datetime.now()
+        first_of_this = today.replace(day=1)
+        last_month_end = first_of_this - timedelta(days=1)
+        last_month_start = last_month_end.replace(day=1)
+        return last_month_start.strftime("%Y-%m-%d"), last_month_end.strftime("%Y-%m-%d")
+
+    # "this month"
+    if "this month" in q:
+        today = datetime.now()
+        first = today.replace(day=1)
+        return first.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+
+    # Year only
     m = re.search(r'(?:in|of)\s+(\d{4})', q)
     if m:
         year = m.group(1)
         return f"{year}-01-01", f"{year}-12-31"
+
+    # Quarter: Q1 2024
     m = re.search(r'q([1-4])\s*(\d{4})', q)
     if m:
         quarter, year = int(m.group(1)), m.group(2)
@@ -118,6 +136,8 @@ def extract_date_range_from_query(query: str) -> Tuple[Optional[str], Optional[s
         month_end = month_start + 2
         day_end = calendar.monthrange(int(year), month_end)[1]
         return (f"{year}-{month_start:02d}-01", f"{year}-{month_end:02d}-{day_end}")
+
+    # Month: January 2024
     months = {
         'january': 1, 'february': 2, 'march': 3, 'april': 4,
         'may': 5, 'june': 6, 'july': 7, 'august': 8,
@@ -129,10 +149,13 @@ def extract_date_range_from_query(query: str) -> Tuple[Optional[str], Optional[s
         month = months[month_name]
         day_end = calendar.monthrange(int(year), month)[1]
         return (f"{year}-{month:02d}-01", f"{year}-{month:02d}-{day_end}")
+
+    # "last year"
     if "last year" in q:
         this_year = datetime.now().year
         year = str(this_year - 1)
         return f"{year}-01-01", f"{year}-12-31"
+
     return None, None
 
 
@@ -147,6 +170,7 @@ def _validate_date(date_str: str) -> bool:
 # ────────────────────────────────────────────────
 # 3. SQL GENERATOR
 # ────────────────────────────────────────────────
+
 def _build_where(vendor_filter=None, date_from=None, date_to=None):
     conditions = []
     params = []
@@ -178,9 +202,10 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
         limit = int(m.group(1) or m.group(2))
         sql = f"""
             SELECT invoice_number, date, vendor_name,
-                   total_amount::numeric::numeric(12,2) AS amount, currency
+                   NULLIF(total_amount, '')::numeric(12,2) AS amount, currency
             FROM invoices WHERE {where_sql}
-            ORDER BY total_amount::numeric DESC LIMIT %s
+            ORDER BY NULLIF(total_amount, '')::numeric DESC
+            LIMIT %s
         """
         return sql, where_params + [limit], f"top {limit} largest invoices"
 
@@ -188,7 +213,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
     if re.search(r"(?:which|what).*vendor.*(?:highest|largest|most)|(?:highest|largest|most).*vendor", q):
         if "total" in q or "amount" in q or "sum" in q:
             sql = f"""
-                SELECT vendor_name, SUM(total_amount::numeric)::numeric(12,2) AS total
+                SELECT vendor_name, SUM(NULLIF(total_amount, '')::numeric)::numeric(12,2) AS total
                 FROM invoices WHERE {where_sql}
                 GROUP BY vendor_name ORDER BY total DESC LIMIT 1
             """
@@ -198,28 +223,27 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
     if re.search(r"(?:which|what).*vendor.*(?:lowest|least|smallest|minimum)|(?:lowest|least|smallest|minimum).*vendor", q):
         if "total" in q or "amount" in q or "sum" in q:
             sql = f"""
-                SELECT vendor_name, SUM(total_amount::numeric)::numeric(12,2) AS total
+                SELECT vendor_name, SUM(NULLIF(total_amount, '')::numeric)::numeric(12,2) AS total
                 FROM invoices WHERE {where_sql}
                 GROUP BY vendor_name ORDER BY total ASC LIMIT 1
             """
             return sql, where_params, "lowest total amount by vendor"
 
-    # Pattern 2b: largest / highest invoice (single invoice, not aggregated)
-    # Matches: "largest invoice", "highest value invoice", "biggest invoice from X", etc.
+    # Pattern 2b: largest / highest invoice from specific vendor
     if re.search(r"(?:largest|biggest|highest)\s+(?:value|amount|total)?\s*invoice\b|"
                  r"\binvoice\b.*(?:largest|biggest|highest)\s+(?:value|amount|total)?", q):
         sql = f"""
             SELECT invoice_number, date, vendor_name,
-                   total_amount::numeric::numeric(12,2) AS amount, currency
+                   NULLIF(total_amount, '')::numeric(12,2) AS amount, currency
             FROM invoices WHERE {where_sql}
-            ORDER BY total_amount::numeric DESC LIMIT 1
+            ORDER BY NULLIF(total_amount, '')::numeric DESC LIMIT 1
         """
         return sql, where_params, "largest invoice"
 
     # Pattern 3: total sum
     if re.search(r"\btotal\b|\bsum\b|\bhow much\b", q) and ("total amount" in q or "sum" in q):
         sql = f"""
-            SELECT COALESCE(SUM(total_amount::numeric), 0)::numeric(12,2) AS total,
+            SELECT COALESCE(SUM(NULLIF(total_amount, '')::numeric), 0)::numeric(12,2) AS total,
                    COUNT(*) AS invoice_count
             FROM invoices WHERE {where_sql}
         """
@@ -238,7 +262,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
             sql = f"""
                 SELECT COUNT(*) AS total_invoices,
                        COUNT(DISTINCT vendor_name) AS unique_vendors,
-                       COALESCE(SUM(total_amount::numeric), 0)::numeric(12,2) AS total_amount
+                       COALESCE(SUM(NULLIF(total_amount, '')::numeric), 0)::numeric(12,2) AS total_amount
                 FROM invoices WHERE {where_sql}
             """
             return sql, where_params, "count summary"
@@ -247,8 +271,8 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
     if re.search(r"average|avg", q) and re.search(r"currency|by currency|per currency", q):
         sql = f"""
             SELECT currency, COUNT(*) AS cnt,
-                   AVG(total_amount::numeric)::numeric(12,2) AS avg_amount,
-                   SUM(total_amount::numeric)::numeric(12,2) AS total
+                   AVG(NULLIF(total_amount, '')::numeric)::numeric(12,2) AS avg_amount,
+                   SUM(NULLIF(total_amount, '')::numeric)::numeric(12,2) AS total
             FROM invoices WHERE {where_sql}
             GROUP BY currency ORDER BY total DESC
         """
@@ -257,7 +281,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
     # Pattern 6: average (general)
     if re.search(r"average|avg", q):
         sql = f"""
-            SELECT AVG(total_amount::numeric)::numeric(12,2) AS avg_amount,
+            SELECT AVG(NULLIF(total_amount, '')::numeric)::numeric(12,2) AS avg_amount,
                    COUNT(*) AS invoice_count
             FROM invoices WHERE {where_sql}
         """
@@ -268,7 +292,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
        and not re.search(r"(?:top|largest|biggest|smallest|highest|lowest)\s+\d+|\d+\s+(?:largest|biggest)", q):
         sql = f"""
             SELECT invoice_number, date, vendor_name,
-                   total_amount::numeric::numeric(12,2) AS amount, currency
+                   NULLIF(total_amount, '')::numeric(12,2) AS amount, currency
             FROM invoices WHERE {where_sql}
             ORDER BY date DESC LIMIT 50
         """
@@ -278,7 +302,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
     if is_aggregation_query(query):
         sql = f"""
             SELECT invoice_number, date, vendor_name,
-                   total_amount::numeric::numeric(12,2) AS amount, currency
+                   NULLIF(total_amount, '')::numeric(12,2) AS amount, currency
             FROM invoices WHERE {where_sql}
             ORDER BY date DESC LIMIT 10
         """
@@ -290,6 +314,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
 # ────────────────────────────────────────────────
 # 4. EXECUTION + FORMATTING
 # ────────────────────────────────────────────────
+
 def _run_sql(sql: str, params: list) -> Tuple[list, list]:
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
@@ -316,6 +341,7 @@ def _format_result(rows: list, colnames: list, desc: str) -> str:
 # ────────────────────────────────────────────────
 # 5. LLM REPHRASER
 # ────────────────────────────────────────────────
+
 def _rephrase_with_llm(question: str, structured_summary: str) -> str:
     prompt = textwrap.dedent(f"""\
         You are a helpful assistant. Based on the data below, answer the user's question
@@ -349,19 +375,14 @@ def _rephrase_with_llm(question: str, structured_summary: str) -> str:
 
 
 # ────────────────────────────────────────────────
-# 6. PUBLIC API — the one function app.py calls
+# 6. PUBLIC API
 # ────────────────────────────────────────────────
+
 def handle_aggregation(query: str, vendor_filter=None,
-                       date_from=None, date_to=None) -> str:
-    """
-    Main entry point for app.py.
-    Detects intent, generates SQL, runs it, formats result, rephrases with LLM.
-    Returns a natural language answer string.
-    """
+                       date_from=None, date_to=None) -> Optional[str]:
     result = generate_aggregation_sql(query, vendor_filter, date_from, date_to)
     if result is None:
-        return None  # caller should fall back to vector search
-
+        return None
     sql, params, desc = result
     rows, colnames = _run_sql(sql, params)
     summary = _format_result(rows, colnames, desc)

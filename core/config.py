@@ -1,14 +1,23 @@
 # ──────────────────── Configuration ────────────────────
 import os
 
-# OCR CLI paths
+# ── OCR: Server mode (primary, faster) ──
+OCR_MODE = "server"               # "server" | "cli"
+OCR_SERVER_URL = "http://127.0.0.1:8081/v1/chat/completions"
+OCR_SERVER_MODEL = "Unlimited-OCR"
+OCR_SERVER_PROMPT = "Please OCR the text in this image."
+OCR_SERVER_TEMPERATURE = 0.1
+OCR_SERVER_MAX_TOKENS = 2048
+OCR_SERVER_REPEAT_PENALTY = 1.1
+
+# ── OCR: CLI mode (fallback, uses subprocess) ──
 LLAMA_CLI = os.path.expanduser("~/llama.cpp/build/bin/llama-mtmd-cli")
-UOCR_MODEL = os.path.expanduser("~/uocr/Unlimited-OCR-Q3_K_M.gguf")
+UOCR_MODEL = os.path.expanduser("~/uocr/Unlimited-OCR-Q4_K_M.gguf")
 UOCR_MMPROJ = os.path.expanduser("~/uocr/mmproj-Unlimited-OCR-F16.gguf")
 
-# Image preprocessing
-MAX_LONG_EDGE = 384
-JPEG_QUALITY = 50
+# ── Image preprocessing ──
+MAX_LONG_EDGE = 1024              # server can handle larger images
+JPEG_QUALITY = 85
 
 # Ollama
 OLLAMA_URL = "http://127.0.0.1:11434"

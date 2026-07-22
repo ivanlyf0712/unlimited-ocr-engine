@@ -248,10 +248,10 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
         limit = int(m.group(1) or m.group(2))
         sql = f"""
             SELECT invoice_number, date, vendor_name,
-                   total_amount::numeric::numeric(12,2) AS amount, currency
+                   NULLIF(total_amount, '')::numeric(12,2) AS amount, currency
             FROM invoices
             WHERE {where_sql}
-            ORDER BY total_amount::numeric DESC
+            ORDER BY NULLIF(total_amount, '')::numeric DESC
             LIMIT %s
         """
         desc = f"top {limit} largest invoices"
@@ -261,7 +261,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
     if re.search(r"(?:which|what).*vendor.*(?:highest|largest|most)|(?:highest|largest|most).*vendor", q):
         if "total" in q or "amount" in q or "sum" in q:
             sql = f"""
-                SELECT vendor_name, SUM(total_amount::numeric)::numeric(12,2) AS total
+                SELECT vendor_name, SUM(NULLIF(total_amount, '')::numeric)::numeric(12,2) AS total
                 FROM invoices
                 WHERE {where_sql}
                 GROUP BY vendor_name
@@ -275,7 +275,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
     if re.search(r"(?:which|what).*vendor.*(?:lowest|least|smallest|minimum)|(?:lowest|least|smallest|minimum).*vendor", q):
         if "total" in q or "amount" in q or "sum" in q:
             sql = f"""
-                SELECT vendor_name, SUM(total_amount::numeric)::numeric(12,2) AS total
+                SELECT vendor_name, SUM(NULLIF(total_amount, '')::numeric)::numeric(12,2) AS total
                 FROM invoices
                 WHERE {where_sql}
                 GROUP BY vendor_name
@@ -289,7 +289,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
     # FIXED: parenthesized the and/or to prevent "sum" substring in "summarize" from triggering
     if re.search(r"\btotal\b|\bsum\b|\bhow much\b", q) and ("total amount" in q or "sum" in q):
         sql = f"""
-            SELECT COALESCE(SUM(total_amount::numeric), 0)::numeric(12,2) AS total,
+            SELECT COALESCE(SUM(NULLIF(total_amount, '')::numeric), 0)::numeric(12,2) AS total,
                    COUNT(*) AS invoice_count
             FROM invoices
             WHERE {where_sql}
@@ -313,7 +313,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
             sql = f"""
                 SELECT COUNT(*) AS total_invoices,
                        COUNT(DISTINCT vendor_name) AS unique_vendors,
-                       COALESCE(SUM(total_amount::numeric), 0)::numeric(12,2) AS total_amount
+                       COALESCE(SUM(NULLIF(total_amount, '')::numeric), 0)::numeric(12,2) AS total_amount
                 FROM invoices
                 WHERE {where_sql}
             """
@@ -325,8 +325,8 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
         sql = f"""
             SELECT currency,
                    COUNT(*) AS cnt,
-                   AVG(total_amount::numeric)::numeric(12,2) AS avg_amount,
-                   SUM(total_amount::numeric)::numeric(12,2) AS total
+                   AVG(NULLIF(total_amount, '')::numeric)::numeric(12,2) AS avg_amount,
+                   SUM(NULLIF(total_amount, '')::numeric)::numeric(12,2) AS total
             FROM invoices
             WHERE {where_sql}
             GROUP BY currency
@@ -338,7 +338,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
     # --- Pattern 6: average (general) ---
     if re.search(r"average|avg", q):
         sql = f"""
-            SELECT AVG(total_amount::numeric)::numeric(12,2) AS avg_amount,
+            SELECT AVG(NULLIF(total_amount, '')::numeric)::numeric(12,2) AS avg_amount,
                    COUNT(*) AS invoice_count
             FROM invoices
             WHERE {where_sql}
@@ -352,7 +352,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
        and not re.search(r"(?:top|largest|biggest|smallest|highest|lowest)\s+\d+|\d+\s+(?:largest|biggest)", q):
         sql = f"""
             SELECT invoice_number, date, vendor_name,
-                   total_amount::numeric::numeric(12,2) AS amount, currency
+                   NULLIF(total_amount, '')::numeric(12,2) AS amount, currency
             FROM invoices
             WHERE {where_sql}
             ORDER BY date DESC
@@ -366,7 +366,7 @@ def generate_aggregation_sql(query: str, vendor_filter=None,
     if is_aggregation_query(query):
         sql = f"""
             SELECT invoice_number, date, vendor_name,
-                   total_amount::numeric::numeric(12,2) AS amount, currency
+                   NULLIF(total_amount, '')::numeric(12,2) AS amount, currency
             FROM invoices
             WHERE {where_sql}
             ORDER BY date DESC

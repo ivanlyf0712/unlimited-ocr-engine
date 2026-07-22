@@ -5,9 +5,13 @@ Localhost Streamlit App for Invoice OCR & RAG – full pipeline with RAG answeri
 """
 
 import streamlit as st
-import os, time, requests
+import os, sys, time, requests
 import pandas as pd
 from datetime import datetime
+
+# Allow imports from sibling modules and the project root (for core.*)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 
 # ── Aggregation Engine (SQL-based query answering) ──
 from agg_engine import handle_aggregation, generate_aggregation_sql, _run_sql
@@ -24,6 +28,100 @@ from core.ocr import run_ocr, clean_grounding_tags
 from core.extraction import text_to_json, text_to_json_fallback, clean_invoice_data, is_likely_fake
 from core.db import get_db_connection, insert_invoice, update_embedding, fetch_all_invoices, search_similar, get_embedding
 from core.pdf import pdf_to_images_bytes
+
+# ──────────────────────────────────────────────────
+# PATH B: Shared helper for semantic search + RAG
+# ──────────────────────────────────────────────────
+def _run_path_b(query: str, vendor_filter, keyword_filter, top_k: int,
+                date_from, date_to, amount_min, amount_max,
+                answer_placeholder, classification: dict, t_classify: float, t_overall: float):
+    """Execute the Path B (semantic search + RAG) pipeline."""
+    st.session_state['search_path'] = "B"
+
+    # Step 1: Search
+    with st.spinner("🔍 Searching invoices..."):
+        results = search_similar(
+            query,
+            vendor_filter=vendor_filter if vendor_filter else None,
+            top_k=top_k,
+            date_from=date_from if date_from else None,
+            date_to=date_to if date_to else None,
+            amount_min=amount_min if amount_min else None,
+            amount_max=amount_max if amount_max else None,
+            keyword_filter=keyword_filter if keyword_filter else None,
+        )
+        st.session_state['search_results'] = results
+    t_search = time.time()
+
+    # Step 2: Generate answer from top 3
+    if results:
+        MAX_CHARS_PER_INVOICE = 2500
+        context_parts = []
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            for r in results[:3]:
+                cur.execute("SELECT raw_text FROM invoices WHERE id = %s", (r[0],))
+                raw_row = cur.fetchone()
+                if raw_row and raw_row[0]:
+                    raw = raw_row[0].strip()
+                    if len(raw) > MAX_CHARS_PER_INVOICE:
+                        raw = raw[:MAX_CHARS_PER_INVOICE] + "\n... [truncated]"
+                    context_parts.append(raw)
+            cur.close()
+
+        if context_parts:
+            context = "\n\n".join(context_parts)
+            rag_prompt = f"""請根據以下發票內容回答問題。如果無法回答，請說「資料不足」。
+問題：{query}
+發票內容：{context}
+答案："""
+
+            with st.spinner("🧠 Generating answer..."):
+                try:
+                    t_gen_start = time.time()
+                    resp = requests.post(
+                        f"{OLLAMA_URL}/api/generate",
+                        json={
+                            "model": RAG_MODEL,
+                            "prompt": rag_prompt,
+                            "stream": False,
+                            "options": {"temperature": 0.1, "num_predict": 256}
+                        },
+                        timeout=120
+                    )
+                    t_gen = time.time()
+                    t_total = t_gen
+                    if resp.status_code == 200:
+                        answer = resp.json().get("response", "").strip()
+                        if answer:
+                            timing_breakdown = (
+                                f"<sub>🧠 Intent: {t_classify - t_overall:.1f}s · "
+                                f"🔍 Search: {t_search - t_classify:.1f}s · "
+                                f"🤖 RAG: {t_gen - t_gen_start:.1f}s · "
+                                f"🕐 Total: {t_total - t_overall:.1f}s</sub>"
+                            )
+                            answer_placeholder.markdown(
+                                f"✅ {answer}\n\n{timing_breakdown}",
+                                unsafe_allow_html=True
+                            )
+                            st.session_state['current_answer'] = answer
+                            st.session_state['search_history'].insert(0, {
+                                "query": query,
+                                "answer": answer,
+                                "path": "B (RAG)",
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            })
+                    else:
+                        answer_placeholder.error(f"RAG model error (HTTP {resp.status_code})")
+                except requests.exceptions.Timeout:
+                    answer_placeholder.error("Request timed out.")
+                except Exception as e:
+                    answer_placeholder.error(f"Unexpected error: {e}")
+        else:
+            answer_placeholder.warning("No OCR text available for these invoices.")
+    else:
+        answer_placeholder.info("No matching invoices found.")
+
 
 # ──────────────────── Streamlit UI ────────────────────
 st.set_page_config(page_title="Invoice OCR & RAG", layout="wide")
@@ -174,6 +272,12 @@ with tab3:
         st.session_state['sql_raw_rows'] = None     # for Path A raw result display
     if 'sql_raw_cols' not in st.session_state:
         st.session_state['sql_raw_cols'] = None
+    if 'sql_raw_sql' not in st.session_state:
+        st.session_state['sql_raw_sql'] = None       # the SQL string itself
+    if 'sql_raw_params' not in st.session_state:
+        st.session_state['sql_raw_params'] = None    # the SQL params
+    if 'classification' not in st.session_state:
+        st.session_state['classification'] = None    # full classification dict
     if 'search_path' not in st.session_state:
         st.session_state['search_path'] = None      # "A" or "B"
 
@@ -238,6 +342,7 @@ with tab3:
             with st.spinner("🧠 Identifying intent..."):
                 classification = classify_hybrid(query)
             t_classify = time.time()
+            st.session_state['classification'] = classification
             st.write(f"⏱ Intent classification: {t_classify - t_overall:.1f}s ({classification.get('method', '?')})")
 
             # Auto-fill filters from classification if user left them blank
@@ -266,6 +371,8 @@ with tab3:
                             raw_rows, raw_cols = _run_sql(sql, params)
                             st.session_state['sql_raw_rows'] = raw_rows
                             st.session_state['sql_raw_cols'] = raw_cols
+                            st.session_state['sql_raw_sql'] = sql
+                            st.session_state['sql_raw_params'] = params
                             st.session_state['sql_desc'] = desc
                     t_sql = time.time()
 
@@ -297,98 +404,25 @@ with tab3:
                             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         })
                     else:
-                        answer_placeholder.info("No matching data found.")
+                        # No SQL template matched – the classifier may have been
+                        # too aggressive. Fall through to semantic search (Path B)
+                        answer_placeholder.info("No predefined SQL template matched. Trying semantic search...")
+                        _run_path_b(query, vendor_filter, keyword_filter, top_k,
+                                    date_from, date_to, amount_min, amount_max,
+                                    answer_placeholder, classification, t_classify, t_overall)
                 except Exception as e:
                     answer_placeholder.error(f"Aggregation error: {e}")
+                    # Fall back to semantic search on error too
+                    _run_path_b(query, vendor_filter, keyword_filter, top_k,
+                                date_from, date_to, amount_min, amount_max,
+                                answer_placeholder, classification, t_classify, t_overall)
 
             # ── PATH B: Semantic Search + RAG ──
             else:
-                st.session_state['search_path'] = "B"
                 answer_placeholder = st.empty()
-
-                # Step 1: Search
-                with st.spinner("🔍 Searching invoices..."):
-                    results = search_similar(
-                        query,
-                        vendor_filter=vendor_filter if vendor_filter else None,
-                        top_k=top_k,
-                        date_from=date_from if date_from else None,
-                        date_to=date_to if date_to else None,
-                        amount_min=amount_min if amount_min else None,
-                        amount_max=amount_max if amount_max else None,
-                        keyword_filter=keyword_filter if keyword_filter else None,
-                    )
-                    st.session_state['search_results'] = results
-                t_search = time.time()
-
-                # Step 2: Generate answer from top 3
-                if results:
-                    MAX_CHARS_PER_INVOICE = 2500
-                    context_parts = []
-                    with get_db_connection() as conn:
-                        cur = conn.cursor()
-                        for r in results[:3]:
-                            cur.execute("SELECT raw_text FROM invoices WHERE id = %s", (r[0],))
-                            raw_row = cur.fetchone()
-                            if raw_row and raw_row[0]:
-                                raw = raw_row[0].strip()
-                                if len(raw) > MAX_CHARS_PER_INVOICE:
-                                    raw = raw[:MAX_CHARS_PER_INVOICE] + "\n... [truncated]"
-                                context_parts.append(raw)
-                        cur.close()
-
-                    if context_parts:
-                        context = "\n\n".join(context_parts)
-                        rag_prompt = f"""請根據以下發票內容回答問題。如果無法回答，請說「資料不足」。
-問題：{query}
-發票內容：{context}
-答案："""
-
-                        with st.spinner("🧠 Generating answer..."):
-                            try:
-                                t_gen_start = time.time()
-                                resp = requests.post(
-                                    f"{OLLAMA_URL}/api/generate",
-                                    json={
-                                        "model": RAG_MODEL,
-                                        "prompt": rag_prompt,
-                                        "stream": False,
-                                        "options": {"temperature": 0.1, "num_predict": 256}
-                                    },
-                                    timeout=120
-                                )
-                                t_gen = time.time()
-                                t_total = t_gen
-                                if resp.status_code == 200:
-                                    answer = resp.json().get("response", "").strip()
-                                    if answer:
-                                        timing_breakdown = (
-                                            f"<sub>🧠 Intent: {t_classify - t_overall:.1f}s · "
-                                            f"🔍 Search: {t_search - t_classify:.1f}s · "
-                                            f"🤖 RAG: {t_gen - t_gen_start:.1f}s · "
-                                            f"🕐 Total: {t_total - t_overall:.1f}s</sub>"
-                                        )
-                                        answer_placeholder.markdown(
-                                            f"✅ {answer}\n\n{timing_breakdown}",
-                                            unsafe_allow_html=True
-                                        )
-                                        st.session_state['current_answer'] = answer
-                                        st.session_state['search_history'].insert(0, {
-                                            "query": query,
-                                            "answer": answer,
-                                            "path": "B (RAG)",
-                                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                        })
-                                else:
-                                    answer_placeholder.error(f"RAG model error (HTTP {resp.status_code})")
-                            except requests.exceptions.Timeout:
-                                answer_placeholder.error("Request timed out.")
-                            except Exception as e:
-                                answer_placeholder.error(f"Unexpected error: {e}")
-                    else:
-                        answer_placeholder.warning("No OCR text available for these invoices.")
-                else:
-                    answer_placeholder.info("No matching invoices found.")
+                _run_path_b(query, vendor_filter, keyword_filter, top_k,
+                            date_from, date_to, amount_min, amount_max,
+                            answer_placeholder, classification, t_classify, t_overall)
 
     # ──────────────────────────────────────────────────
     # DISPLAY ANSWER (persisted)
@@ -403,10 +437,35 @@ with tab3:
     # ──────────────────────────────────────────────────
     if st.session_state.get('sql_raw_rows') is not None:
         st.divider()
+
+        # ── Recognised fields (collapsible) ──
+        classification = st.session_state.get('classification')
+        if classification:
+            with st.expander("🔎 Recognised Fields", expanded=False):
+                fields = []
+                if classification.get("vendor"):
+                    fields.append(f"  vendor = `{classification['vendor']}`")
+                if classification.get("date_from"):
+                    fields.append(f"  date_from = `{classification['date_from']}`")
+                if classification.get("date_to"):
+                    fields.append(f"  date_to = `{classification['date_to']}`")
+                fields.append(f"  method = `{classification.get('method', '?')}`")
+                fields.append(f"  intent = `{classification.get('intent', '?')}`")
+                if classification.get("aggregation_type"):
+                    fields.append(f"  aggregation_type = `{classification['aggregation_type']}`")
+                st.code("\n".join(fields), language=None)
+
+        # ── Generated SQL (collapsible) ──
+        sql_text = st.session_state.get('sql_raw_sql')
+        if sql_text:
+            with st.expander("📝 Generated SQL", expanded=False):
+                st.code(sql_text.strip(), language="sql")
+
+        # ── SQL result table ──
         raw_rows = st.session_state['sql_raw_rows']
         raw_cols = st.session_state['sql_raw_cols']
         desc = st.session_state.get('sql_desc', 'SQL result')
-        st.caption(f"📊 Raw {desc} ({len(raw_rows)} row(s))")
+        st.caption(f"📊 {desc} — {len(raw_rows)} row(s)")
         if raw_cols:
             df_sql = pd.DataFrame(raw_rows, columns=raw_cols)
             st.dataframe(df_sql, width='stretch')
