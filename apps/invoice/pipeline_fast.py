@@ -6,13 +6,16 @@ Fast two‑stage invoice OCR pipeline with PDF support.
 Usage:
   python3 pipeline_fast.py -f invoice.jpg
   python3 pipeline_fast.py -f batch_of_invoices.pdf   # each page = own invoice
-  python3 pipeline_fast.py -f single_invoice_3pages.pdf --multi-page
   python3 pipeline_fast.py -d ./input_folder/
 """
 
 import argparse, json, os, sys, time
 import requests, psycopg2
 
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+    
 # ── Core modules ──
 from core.config import (
     OLLAMA_URL, DB_CONFIG, LLAMA_SERVER_URL
@@ -115,7 +118,7 @@ def multi_page_ocr(pdf_path: str) -> str:
         "model": "unlimited-ocr",
         "messages": [{"role": "user", "content": content_parts}],
         "temperature": 0,
-        "max_tokens": 4096
+        "max_tokens": 16384
     }
     resp = requests.post(LLAMA_SERVER_URL, json=payload, timeout=300)
     resp.raise_for_status()

@@ -9,6 +9,10 @@ import os, sys, time, requests
 import pandas as pd
 from datetime import datetime
 
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+    
 # Allow imports from sibling modules and the project root (for core.*)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))

@@ -80,16 +80,17 @@ $LLAMA_SERVER \
     -m "$MODEL" \
     --mmproj "$MMPROJ" \
     --chat-template deepseek-ocr \
-    -c 4096 \
+    -c 16384 \
     --host 0.0.0.0 \
     --port "$SERVER_PORT" \
     --temp 0 \
     --threads 4 \
-    --verbose \
-    --image-min-tokens 256 \
+    --image-min-tokens 64 \
     --image-max-tokens 1024 \
-    --cache-ram 0 \
-    --no-kv-offload &
+    --mlock \
+    --no-mmap \
+    --verbose \
+    --cache-reuse 256 &
 SERVER_PID=$!
 
 echo "✅ llama-server started (pid $SERVER_PID)"
