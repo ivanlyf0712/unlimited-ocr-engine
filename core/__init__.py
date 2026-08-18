@@ -1,4 +1,4 @@
 # OCR engine package
-from core.ocr import run_ocr
+from core.ocr import run_ocr, ocr_pdf
 
-__all__ = ["run_ocr"]
+__all__ = ["run_ocr", "ocr_pdf"]

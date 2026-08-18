@@ -21,17 +21,14 @@ Extracts raw text from images and multi-page PDFs — no GPU, no cloud, no per-p
 
 ```
 core/
-  ocr.py        # run_ocr() — server/CLI backends, preprocessing, PDF handling
+  ocr.py        # run_ocr() / ocr_pdf() — server/CLI backends, preprocessing, CLI entry point
   pdf.py        # PDF → image helpers (PyMuPDF)
   config.py     # env-driven configuration (server URL, model paths, image settings)
 scripts/
-  batch_ocr.py              # OCR large PDFs page-by-page via CLI
-  ocr_fast.py               # quick single-image / PDF OCR via server
-  benchmark_server.py       # server-mode timing
+  batch_ocr.py              # OCR large PDFs in chunks via CLI (memory-friendly)
+  benchmark_server.py       # server-mode timing on images/PDFs
   benchmark_resolutions.py  # accuracy/speed trade-off across resolutions
   test_llama_server.sh      # smoke-test a running llama-server
-tests/
-  test_ocr.py     # CLI wrapper test with preprocessing
 samples/          # sample images & PDFs
 ```
 
@@ -74,19 +71,23 @@ pip install -r requirements.txt
   --chat-template deepseek-ocr --port 8081
 ```
 
-**OCR an image or PDF from Python:**
-
-```python
-from core import run_ocr
-
-text = run_ocr("samples/sample_invoice.jpg")
-print(text)
-```
-
-**Batch PDF via CLI:**
+**OCR from the command line:**
 
 ```bash
-python3 scripts/batch_ocr.py document.pdf -o output.txt --chunk-size 10
+# single image
+python3 -m core.ocr samples/sample_invoice.jpg
+
+# PDF → markdown file
+python3 -m core.ocr document.pdf -o output.md
+```
+
+**Or from Python:**
+
+```python
+from core import run_ocr, ocr_pdf
+
+text = run_ocr("samples/sample_invoice.jpg")
+full = ocr_pdf("document.pdf", output_path="output.md")
 ```
 
 ## Configuration
@@ -102,6 +103,44 @@ All settings are environment-variable driven (see `core/config.py`):
 | `UOCR_MODEL` / `UOCR_MMPROJ` | `~/uocr/...` | GGUF model files |
 | `MAX_LONG_EDGE` | `512` | resize target (px) |
 | `JPEG_QUALITY` | `60` | preprocessing quality |
+
+## Testing
+
+All tests require the llama.cpp binary and GGUF model (see [Setup](#setup)).
+
+**1. Smoke-test the server** (fastest — verifies llama-server is up and responding):
+
+```bash
+# start the server first (see Usage), then:
+./scripts/test_llama_server.sh samples/sample_invoice.jpg
+```
+
+**2. End-to-end OCR test** (server mode):
+
+```bash
+python3 -m core.ocr samples/sample_invoice.jpg
+# expected: extracted invoice text printed to stdout
+```
+
+**3. CLI-mode test** (no server needed, uses `llama-mtmd-cli` directly):
+
+```bash
+OCR_MODE=cli python3 -m core.ocr samples/sample_invoice.jpg
+```
+
+**4. Benchmarks** (measure throughput on your hardware):
+
+```bash
+python3 scripts/benchmark_server.py -f samples/sample_invoice.jpg
+python3 scripts/benchmark_resolutions.py        # resolution vs speed/quality
+```
+
+**5. Batch / large-PDF test** (chunked, memory-friendly):
+
+```bash
+python3 scripts/batch_ocr.py samples/bcards/22072026121114-0001.pdf -o out.txt
+```
+
 
 ## Performance
 
