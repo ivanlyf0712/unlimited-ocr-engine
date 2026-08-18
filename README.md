@@ -138,7 +138,7 @@ python3 scripts/benchmark_resolutions.py        # resolution vs speed/quality
 **5. Batch / large-PDF test** (chunked, memory-friendly):
 
 ```bash
-python3 scripts/batch_ocr.py samples/bcards/22072026121114-0001.pdf -o out.txt
+python3 scripts/batch_ocr.py path/to/your_document.pdf -o out.txt
 ```
 
 
